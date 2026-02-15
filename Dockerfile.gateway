@@ -1,0 +1,18 @@
+FROM node:20-slim
+
+RUN groupadd -r braindb && useradd -r -g braindb -m braindb
+
+WORKDIR /app
+
+COPY package.json .
+RUN npm install --production && npm cache clean --force
+
+COPY gateway.js auto-capture.js ./
+
+RUN mkdir -p /app/data && chown -R braindb:braindb /app
+
+USER braindb
+
+EXPOSE 3333
+
+CMD ["node", "gateway.js"]
