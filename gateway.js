@@ -1670,6 +1670,79 @@ Rules:
   }
 });
 
+// ─── Session Context — Compaction-Proof Conversational Memory ─────────
+const SESSION_CONTEXT_PREFIX = 'session-ctx::';
+
+app.post('/memory/session-context', async (req, res) => {
+  const start = Date.now();
+  const { sessionKey, topic, activeTask, lastUserMessage, lastAgentAction, pendingQuestions, decisions, summary } = req.body;
+  if (!sessionKey) return res.status(400).json({ ok: false, error: 'sessionKey required' });
+
+  const contextId = `${SESSION_CONTEXT_PREFIX}${sessionKey}`;
+  const content = [
+    summary && `Summary: ${summary}`,
+    topic && `Topic: ${topic}`,
+    activeTask && `Active task: ${activeTask}`,
+    lastUserMessage && `Last user said: ${lastUserMessage}`,
+    lastAgentAction && `Agent was doing: ${lastAgentAction}`,
+    pendingQuestions && `Pending: ${pendingQuestions}`,
+    decisions && `Decisions: ${decisions}`,
+  ].filter(Boolean).join('\n');
+  if (!content) return res.status(400).json({ ok: false, error: 'No context fields provided' });
+
+  try {
+    // Delete previous session context (overwrite)
+    for (const shardName of ['episodic']) {
+      try {
+        await cypher(shardName, {
+          statement: `MATCH (m:Memory) WHERE m.trigger STARTS WITH $prefix DETACH DELETE m`,
+          parameters: { prefix: contextId },
+        });
+      } catch {}
+    }
+    // Remove from embedding cache
+    for (let i = embeddingCache.length - 1; i >= 0; i--) {
+      if (embeddingCache[i].trigger && embeddingCache[i].trigger.startsWith(contextId)) {
+        embeddingCache.splice(i, 1);
+      }
+    }
+    const result = await encode({
+      event: contextId,
+      content,
+      context: { source: 'session-context', sessionKey, when: new Date().toISOString() },
+      shard: 'episodic',
+      motivationDelta: { survive: 0.8, serve: 0.5 },
+      dedupThreshold: 0,
+    });
+    res.json({ ok: true, id: result.id, latency: Date.now() - start });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/memory/session-context', async (req, res) => {
+  const start = Date.now();
+  const { sessionKey } = req.query;
+  const prefix = sessionKey ? `${SESSION_CONTEXT_PREFIX}${sessionKey}` : SESSION_CONTEXT_PREFIX;
+  try {
+    const r = await cypher('episodic', {
+      statement: `MATCH (m:Memory) WHERE m.trigger STARTS WITH $prefix
+        RETURN m.id AS id, m.content AS content, m.trigger AS trigger, m.created AS created
+        ORDER BY m.created DESC LIMIT ${sessionKey ? 1 : 5}`,
+      parameters: { prefix },
+    });
+    const data = r?.[0]?.data;
+    if (sessionKey) {
+      const row = data?.[0];
+      res.json({ ok: true, context: row ? { id: row.row[0], content: row.row[1], trigger: row.row[2], created: row.row[3] } : null, latency: Date.now() - start });
+    } else {
+      res.json({ ok: true, contexts: (data || []).map(d => ({ id: d.row[0], content: d.row[1], created: d.row[2] })), latency: Date.now() - start });
+    }
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3333;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🧠 BrainDB Gateway v0.5.0 listening on port ${PORT}`);
